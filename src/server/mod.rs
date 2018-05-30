@@ -1,39 +1,39 @@
 //! Hyper server bindings for unix domain sockets
 
-use std::marker::PhantomData;
+use hyper::body::Payload;
+use hyper::Body;
 use std::path::Path;
+use std;
 
-use futures::future::Future;
-use futures::stream::Stream;
-use hyper::{Request, Response};
-use hyper::server::Http as HyperHttp;
+use futures::{Future, Stream};
+
+use hyper::server::conn::Http as HyperHttp;
 use tokio_core::reactor::Core;
-use tokio_service::NewService;
+use hyper::service::NewService;
 use tokio_uds::UnixListener;
+use tokio;
 
 /// An instance of a server created through `Http::bind`.
 //
 /// This structure is used to create instances of Servers to spawn off tasks
 /// which handle a connection to an HTTP server.
-pub struct Server<S, B>
-where
-    B: Stream<Error = ::hyper::Error>,
-    B::Item: AsRef<[u8]>,
+pub struct Server<S>
 {
-    protocol: HyperHttp<B::Item>,
+    protocol: HyperHttp,
     new_service: S,
     core: Core,
     listener: UnixListener,
 }
 
-impl<S, B> Server<S, B>
+impl<S, Bd> Server<S>
 where
-    S: NewService<Request = Request, Response = Response<B>, Error = ::hyper::Error>
-        + Send
-        + Sync
-        + 'static,
-    B: Stream<Error = ::hyper::Error> + 'static,
-    B::Item: AsRef<[u8]>,
+    S: NewService<ReqBody=Body, ResBody=Bd> + Send + 'static,
+    S::Error: Into<Box<::std::error::Error + Send + Sync>>,
+    S::Service: Send,
+    S::Error: Into<Box<::std::error::Error + Send + Sync>>,
+    <S as ::hyper::service::NewService>::Future: Send,
+    <S::Service as ::hyper::service::Service>::Future: Send + 'static,
+    Bd: Payload
 {
     pub fn run(self) -> ::hyper::Result<()> {
         let Server {
@@ -43,20 +43,23 @@ where
             listener,
             ..
         } = self;
-        let handle = core.handle();
+
+        let _protocol = protocol.clone();
         let server = listener
             .incoming()
-            .for_each(move |(sock, _)| {
-                protocol.bind_connection(
-                    &handle,
-                    sock,
-                    ([127, 0, 0, 1], 0).into(),
-                    new_service.new_service()?,
-                );
+            .for_each(move |sock| {
+                let _protocol = protocol.clone();
+
+                let fut = new_service.new_service().map_err(|_| ()).map (move |service| {
+                    _protocol.serve_connection(sock, service).map_err(|_| ())
+                }).flatten();
+
+                tokio::spawn(fut.map_err(|_| ()));
                 Ok(())
-            })
-            .map_err(|_| ());
-        core.run(server);
+            }).map_err(|_| ());
+
+        core.run(server).unwrap();
+
         Ok(())
     }
 }
@@ -76,36 +79,54 @@ where
 /// //)
 ///
 /// ```
-pub struct Http<B = ::hyper::Chunk> {
-    _marker: PhantomData<B>,
+pub struct Http {
 }
 
-impl<B> Clone for Http<B> {
-    fn clone(&self) -> Http<B> {
+impl Clone for Http {
+    fn clone(&self) -> Http {
         Http { ..*self }
     }
 }
 
-impl<B: AsRef<[u8]> + 'static> Http<B> {
+#[derive(Debug)]
+pub enum BindError {
+    IoError(std::io::Error),
+    HyperError(::hyper::Error),
+}
+
+impl From<std::io::Error> for BindError {
+    fn from(error: std::io::Error) -> Self {
+        BindError::IoError(error)
+    }
+}
+
+impl From<::hyper::Error> for BindError {
+    fn from(error: ::hyper::Error) -> Self {
+        BindError::HyperError(error)
+    }
+}
+
+
+impl Http {
     /// Creates a new instance of the HTTP protocol, ready to spawn a server or
     /// start accepting connections.
-    pub fn new() -> Http<B> {
-        Http { _marker: PhantomData }
+    pub fn new() -> Http {
+        Http {  }
     }
 
     /// binds a new server instance to a unix domain socket path
-    pub fn bind<P, S, Bd>(&self, path: P, new_service: S) -> ::hyper::Result<Server<S, Bd>>
+    pub fn bind<P, S, Bd>(&self, path: P, new_service: S) -> Result<Server<S>, BindError>
     where
         P: AsRef<Path>,
-        S: NewService<Request = Request, Response = Response<Bd>, Error = ::hyper::Error>
+        S: NewService<ReqBody = Body, ResBody= Bd>
             + Send
             + Sync
             + 'static,
-        Bd: Stream<Item = B, Error = ::hyper::Error> + 'static,
+        Bd: Payload,
     {
         let core = Core::new()?;
         let handle = core.handle();
-        let listener = UnixListener::bind(path.as_ref(), &handle)?;
+        let listener = UnixListener::bind(path.as_ref())?;
 
         Ok(Server {
             protocol: HyperHttp::new(),

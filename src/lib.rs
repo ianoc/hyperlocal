@@ -5,6 +5,7 @@
 //! for how to configure hyper servers
 extern crate futures;
 extern crate hyper;
+extern crate tokio;
 extern crate tokio_uds;
 extern crate tokio_core;
 extern crate tokio_io;
@@ -77,6 +78,17 @@ impl<'a> Uri<'a> {
             })
             .next()
     }
+
+    fn socket_path_from_host(host: &str) -> Option<String> {
+        Some(host)
+            .iter()
+            .filter_map(|host| {
+                Vec::from_hex(host).ok().map(|raw| {
+                    String::from_utf8_lossy(&raw).into_owned()
+                })
+            })
+            .next()
+    }
 }
 
 
@@ -100,3 +112,4 @@ mod tests {
         assert_eq!(path, expected);
     }
 }
+
