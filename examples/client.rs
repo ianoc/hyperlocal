@@ -1,7 +1,7 @@
 extern crate futures;
 extern crate hyper;
 extern crate hyperlocal;
-extern crate tokio_core;
+extern crate tokio;
 
 use hyper::Body;
 use std::io::{self, Write};
@@ -10,7 +10,6 @@ use futures::Stream;
 use futures::Future;
 use hyper::Client;
 use hyperlocal::{Uri, UnixConnector};
-use tokio_core::reactor::Core;
 
 #[derive(Debug)]
 pub enum ClientError {
@@ -31,8 +30,7 @@ impl From<::hyper::Error> for ClientError {
 }
 
 
-fn run() -> Result<(), ClientError> {
-    let mut core = Core::new().unwrap();
+fn run() -> () {
     let client = Client::builder()
         .build::<_, Body>(UnixConnector::new());
 
@@ -49,11 +47,13 @@ fn run() -> Result<(), ClientError> {
         })
         .map(|_| {
             println!("\n\nDone.");
-        });
+        }).map_err(|err| {
+        println!("server error {:?}", err);
+        });;
 
-    core.run(work).map_err(From::from)
+    tokio::run(work)
 }
 
 fn main() {
-    run().unwrap()
+    run()
 }
